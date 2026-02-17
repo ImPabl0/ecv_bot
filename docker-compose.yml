@@ -1,0 +1,18 @@
+services:
+  api:
+    build: ./api_football
+    container_name: ecv-api
+    ports:
+      - "5000:5000"
+    restart: unless-stopped
+
+  bot:
+    build: ./bot
+    container_name: ecv-bot
+    env_file:
+      - ./bot/.env
+    environment:
+      - API_FOOTBALL_URL=http://api:5000
+    depends_on:
+      - api
+    restart: unless-stopped
