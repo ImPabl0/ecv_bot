@@ -331,21 +331,21 @@ public class MatchMonitor {
 
         switch (newPeriodId) {
             case "PRIMEIRO_TEMPO" -> {
-                channel.sendMessageEmbeds(GameEmbeds.startMatch(homeTeam, awayTeam, championship)).queue();
+                sendNotification(channel, GameEmbeds.startMatch(homeTeam, awayTeam, championship));
                 trySendSticker(channel, Stickers.Events.Whistle);
             }
             case "INTERVALO" -> {
-                channel.sendMessageEmbeds(GameEmbeds.scoreboard(
-                        homeTeam, homeScore, awayTeam, awayScore, championship, "Intervalo")).queue();
+                sendNotification(channel, GameEmbeds.scoreboard(
+                        homeTeam, homeScore, awayTeam, awayScore, championship, "Intervalo"));
             }
             case "SEGUNDO_TEMPO" -> {
-                channel.sendMessageEmbeds(GameEmbeds.scoreboard(
-                        homeTeam, homeScore, awayTeam, awayScore, championship, "Começa o 2º tempo!")).queue();
+                sendNotification(channel, GameEmbeds.scoreboard(
+                        homeTeam, homeScore, awayTeam, awayScore, championship, "Começa o 2º tempo!"));
                 trySendSticker(channel, Stickers.Events.Whistle);
             }
             case "FIM_DE_JOGO", "ENCERRADO" -> {
-                channel.sendMessageEmbeds(GameEmbeds.endMatch(
-                        homeTeam, homeScore, awayTeam, awayScore, championship)).queue();
+                sendNotification(channel, GameEmbeds.endMatch(
+                        homeTeam, homeScore, awayTeam, awayScore, championship));
                 trySendSticker(channel, Stickers.Events.Whistle);
             }
         }
@@ -368,7 +368,8 @@ public class MatchMonitor {
     }
 
     /**
-     * Evento "score_change": mudança no placar (atualiza estado local).
+     * Evento "score_change": mudança no placar (atualiza estado local e envia
+     * placar atualizado).
      */
     private void handleScoreChange(String data) {
         JsonObject json = JsonParser.parseString(data).getAsJsonObject();
@@ -380,11 +381,23 @@ public class MatchMonitor {
         logger.info("Placar atualizado via SSE: {} {} x {} {}",
                 homeAbbr, homeScore, awayScore, awayAbbr);
 
-        // Atualizar o estado local para que embeds subsequentes reflitam o placar correto
+        // Atualizar o estado local para que embeds subsequentes reflitam o placar
+        // correto
         MatchState current = lastState;
         if (current != null) {
             current.setHomeScore(homeScore);
             current.setAwayScore(awayScore);
+
+            // Enviar placar atualizado imediatamente no canal
+            TextChannel channel = getNotificationChannel();
+            if (channel != null) {
+                sendNotification(channel, GameEmbeds.scoreboard(
+                        current.getHomeTeamName(), homeScore,
+                        current.getAwayTeamName(), awayScore,
+                        current.getChampionship(),
+                        current.getCurrentTime().isEmpty() ? current.getPeriod()
+                                : current.getPeriod() + " — " + current.getCurrentTime()));
+            }
         }
     }
 
@@ -399,6 +412,25 @@ public class MatchMonitor {
         String minuto = event.getMinute();
         String team = event.getTeam();
         String imageUrl = event.getImage();
+
+        // Atualizar placar local ANTES de montar o embed
+        // (o play_new de gol pode chegar antes do score_change)
+        if (state != null) {
+            boolean isOwnGoal = "OWN_GOAL".equals(event.getGoalKind());
+            if (team.equalsIgnoreCase(state.getHomeTeamAbbreviation())) {
+                if (isOwnGoal) {
+                    state.setAwayScore(state.getAwayScore() + 1);
+                } else {
+                    state.setHomeScore(state.getHomeScore() + 1);
+                }
+            } else if (team.equalsIgnoreCase(state.getAwayTeamAbbreviation())) {
+                if (isOwnGoal) {
+                    state.setHomeScore(state.getHomeScore() + 1);
+                } else {
+                    state.setAwayScore(state.getAwayScore() + 1);
+                }
+            }
+        }
 
         // Construir texto do gol
         String golTipo = switch (event.getGoalKind()) {
@@ -419,7 +451,7 @@ public class MatchMonitor {
         String placar = state != null ? state.getScoreText() : "";
         MessageEmbed embed = GameEmbeds.goalFromApi(titulo, jogador, minuto, placar,
                 event.getDescription(), imageUrl);
-        channel.sendMessageEmbeds(embed).queue();
+        sendNotification(channel, embed);
 
         // Tentar enviar sticker do jogador
         Player player = playerRepository.findByNameAndTeam(jogador, team);
@@ -448,10 +480,10 @@ public class MatchMonitor {
         String cardType = !event.getCardType().isEmpty() ? event.getCardType() : event.getGoalKind();
 
         if (cardType.contains("RED") || cardType.contains("SECOND_YELLOW")) {
-            channel.sendMessageEmbeds(GameEmbeds.redCard(jogador, minuto, imageUrl)).queue();
+            sendNotification(channel, GameEmbeds.redCard(jogador, minuto, imageUrl));
             trySendSticker(channel, Stickers.Cards.Red);
         } else {
-            channel.sendMessageEmbeds(GameEmbeds.yellowCard(jogador, minuto, imageUrl)).queue();
+            sendNotification(channel, GameEmbeds.yellowCard(jogador, minuto, imageUrl));
             trySendSticker(channel, Stickers.Cards.Yellow);
         }
 
@@ -473,7 +505,7 @@ public class MatchMonitor {
         String team = event.getTeam();
         String imageUrl = event.getImage();
 
-        channel.sendMessageEmbeds(GameEmbeds.substitution(saiu, entrou, minuto, imageUrl)).queue();
+        sendNotification(channel, GameEmbeds.substitution(saiu, entrou, minuto, imageUrl));
 
         // Tentar enviar sticker do jogador que entrou
         Player player = playerRepository.findByNameAndTeam(entrou, team);
@@ -492,7 +524,7 @@ public class MatchMonitor {
         if (description != null && !description.isBlank()) {
             MessageEmbed embed = GameEmbeds.importantEvent(event.getTitle(), event.getMinute(), description,
                     event.getImage());
-            channel.sendMessageEmbeds(embed).queue();
+            sendNotification(channel, embed);
         }
     }
 
@@ -506,11 +538,23 @@ public class MatchMonitor {
         if ((title != null && !title.isBlank()) || (description != null && !description.isBlank())) {
             MessageEmbed embed = GameEmbeds.normalEvent(
                     event.getMinute(), event.getTypeLabel(), title, description, event.getImage());
-            channel.sendMessageEmbeds(embed).queue();
+            sendNotification(channel, embed);
         }
     }
 
     // ======================== UTILITÁRIOS ========================
+
+    /**
+     * Envia uma notificação no canal, mencionando o cargo configurado (se houver).
+     */
+    private void sendNotification(TextChannel channel, MessageEmbed embed) {
+        String roleMention = BotConfig.getNotificationRoleMention();
+        if (!roleMention.isEmpty()) {
+            channel.sendMessage(roleMention).setEmbeds(embed).queue();
+        } else {
+            channel.sendMessageEmbeds(embed).queue();
+        }
+    }
 
     private TextChannel getNotificationChannel() {
         String channelId = BotConfig.getNotificationChannelId();

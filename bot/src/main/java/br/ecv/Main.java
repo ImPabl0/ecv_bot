@@ -72,6 +72,15 @@ public class Main {
                                 Commands.slash("parar", "Para o monitoramento da partida atual"),
                                 Commands.slash("placar", "Mostra o placar da partida monitorada"),
                                 Commands.slash("estatisticas", "Mostra as estatísticas da partida monitorada"),
+                                Commands.slash("atualizarplacar",
+                                                "Força a atualização do placar da partida monitorada"),
+                                Commands.slash("atualizartempo", "Força a atualização do tempo do jogo monitorado"),
+                                Commands.slash("cargonotificacao", "Define o cargo a ser mencionado nas notificações")
+                                                .addOption(OptionType.ROLE, "cargo",
+                                                                "Cargo que será notificado (deixe vazio para ver/remover)",
+                                                                false),
+                                Commands.slash("teste",
+                                                "Envia um embed fictício de lance no canal configurado (debug)"),
                                 Commands.slash("jogador", "Gerenciar jogadores no banco de dados")
                                                 .addSubcommands(
                                                                 new SubcommandData("adicionar", "Adiciona um jogador")

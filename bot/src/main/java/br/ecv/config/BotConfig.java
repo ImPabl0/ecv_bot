@@ -19,6 +19,7 @@ public class BotConfig {
     private static String apiFootballUrl;
     private static int pollInterval;
     private static String monitoredMatchUrl = null;
+    private static String notificationRoleId = null;
     private static boolean debug;
 
     public static void load(Dotenv dotenv) {
@@ -27,8 +28,8 @@ public class BotConfig {
             ADMIN_IDS.addAll(Arrays.asList(adminIds.split(",")));
         }
         guildId = dotenv.get("GUILD_ID");
-        debug = java.lang.management.ManagementFactory.getRuntimeMXBean().
-                getInputArguments().toString().contains("-agentlib:jdwp");
+        debug = java.lang.management.ManagementFactory.getRuntimeMXBean().getInputArguments().toString()
+                .contains("-agentlib:jdwp");
         String defaultUrl = debug ? "http://localhost:5000" : "http://api:5000";
         apiFootballUrl = dotenv.get("API_FOOTBALL_URL", defaultUrl);
         String pollStr = dotenv.get("POLL_INTERVAL", "15");
@@ -85,5 +86,24 @@ public class BotConfig {
 
     public static boolean isDebug() {
         return debug;
+    }
+
+    public static String getNotificationRoleId() {
+        return notificationRoleId;
+    }
+
+    public static void setNotificationRoleId(String roleId) {
+        notificationRoleId = roleId;
+    }
+
+    /**
+     * Retorna a menção do cargo de notificação formatada, ou string vazia se não
+     * configurado.
+     */
+    public static String getNotificationRoleMention() {
+        if (notificationRoleId == null || notificationRoleId.isBlank()) {
+            return "";
+        }
+        return "<@&" + notificationRoleId + ">";
     }
 }

@@ -53,6 +53,10 @@ public class CommandListener extends ListenerAdapter {
             case "placar" -> handlePlacar(event);
             case "estatisticas" -> handleEstatisticas(event);
             case "jogador" -> handleJogador(event, userId);
+            case "atualizarplacar" -> handleAtualizarPlacar(event, userId);
+            case "atualizartempo" -> handleAtualizarTempo(event, userId);
+            case "cargonotificacao" -> handleCargoNotificacao(event, userId);
+            case "teste" -> handleTeste(event, userId);
         }
     }
 
@@ -83,6 +87,7 @@ public class CommandListener extends ListenerAdapter {
 
         // Seletor de canais
         List<TextChannel> channels = event.getGuild().getTextChannels();
+
         StringSelectMenu.Builder menuBuilder = StringSelectMenu.create("select_channel")
                 .setPlaceholder("Selecione o canal de notificações")
                 .setMinValues(1)
@@ -333,6 +338,267 @@ public class CommandListener extends ListenerAdapter {
                         .setEphemeral(true).queue();
             }
         }
+    }
+
+    /**
+     * Configura o cargo que será mencionado em todas as notificações.
+     */
+    private void handleCargoNotificacao(SlashCommandInteractionEvent event, String userId) {
+        if (!checkAdmin(event, userId))
+            return;
+
+        var roleOption = event.getOption("cargo");
+        if (roleOption == null) {
+            // Mostrar cargo atual ou remover
+            String currentRoleId = BotConfig.getNotificationRoleId();
+            if (currentRoleId != null) {
+                event.replyEmbeds(GameEmbeds.success("Cargo de Notificação",
+                        String.format(
+                                "Cargo configurado: <@&%s>\n\nPara remover, use `/cargonotificacao` com o mesmo cargo.",
+                                currentRoleId)))
+                        .setEphemeral(true).queue();
+            } else {
+                event.replyEmbeds(GameEmbeds.error("Sem Cargo",
+                        "Nenhum cargo de notificação configurado. Use `/cargonotificacao cargo:@Cargo` para configurar."))
+                        .setEphemeral(true).queue();
+            }
+            return;
+        }
+
+        var role = roleOption.getAsRole();
+        String currentRoleId = BotConfig.getNotificationRoleId();
+
+        // Se o cargo já está configurado e é o mesmo, remove
+        if (role.getId().equals(currentRoleId)) {
+            BotConfig.setNotificationRoleId(null);
+            event.replyEmbeds(GameEmbeds.success("Cargo Removido",
+                    String.format("O cargo **%s** foi removido das notificações.", role.getName())))
+                    .setEphemeral(true).queue();
+            logger.info("Cargo de notificação removido por {}", event.getUser().getName());
+        } else {
+            BotConfig.setNotificationRoleId(role.getId());
+            event.replyEmbeds(GameEmbeds.success("Cargo Configurado",
+                    String.format("O cargo **%s** será mencionado em todas as notificações da partida.",
+                            role.getName())))
+                    .setEphemeral(true).queue();
+            logger.info("Cargo de notificação configurado: {} ({}) por {}", role.getName(), role.getId(),
+                    event.getUser().getName());
+        }
+    }
+
+    /**
+     * Força a atualização do placar buscando dados frescos da API e envia no canal.
+     */
+    private void handleAtualizarPlacar(SlashCommandInteractionEvent event, String userId) {
+        if (!checkAdmin(event, userId))
+            return;
+
+        String monitoredUrl = BotConfig.getMonitoredMatchUrl();
+        if (monitoredUrl == null || monitoredUrl.isBlank()) {
+            event.replyEmbeds(GameEmbeds.error("Sem Monitoramento",
+                    "Nenhuma partida está sendo monitorada. Use `/monitorar <url>` para iniciar."))
+                    .setEphemeral(true).queue();
+            return;
+        }
+
+        event.deferReply().queue();
+
+        try {
+            JsonObject json = apiClient.getMatch(monitoredUrl);
+            MatchState freshState = MatchState.fromJson(json);
+
+            // Atualizar o estado local do monitor
+            MatchState currentState = matchMonitor.getLastState();
+            if (currentState != null) {
+                currentState.setHomeScore(freshState.getHomeScore());
+                currentState.setAwayScore(freshState.getAwayScore());
+            }
+
+            // Enviar placar atualizado no canal de notificações
+            TextChannel notifChannel = null;
+            if (BotConfig.getNotificationChannelId() != null && BotConfig.getGuildId() != null) {
+                var guild = event.getJDA().getGuildById(BotConfig.getGuildId());
+                if (guild != null) {
+                    notifChannel = guild.getTextChannelById(BotConfig.getNotificationChannelId());
+                }
+            }
+
+            String status = freshState.getCurrentTime().isEmpty()
+                    ? freshState.getPeriod()
+                    : freshState.getPeriod() + " — " + freshState.getCurrentTime();
+
+            if (notifChannel != null) {
+                notifChannel.sendMessageEmbeds(GameEmbeds.scoreboard(
+                        freshState.getHomeTeamName(), freshState.getHomeScore(),
+                        freshState.getAwayTeamName(), freshState.getAwayScore(),
+                        freshState.getChampionship(), status)).queue();
+            }
+
+            event.getHook().editOriginalEmbeds(GameEmbeds.success("Placar Atualizado",
+                    String.format("Placar atualizado: **%s** %d x %d **%s**",
+                            freshState.getHomeTeamName(), freshState.getHomeScore(),
+                            freshState.getAwayScore(), freshState.getAwayTeamName())))
+                    .queue();
+
+        } catch (Exception e) {
+            logger.error("Erro ao atualizar placar: {}", e.getMessage());
+            event.getHook().editOriginalEmbeds(GameEmbeds.error("Erro",
+                    "Não foi possível atualizar o placar. Verifique se a API está rodando."))
+                    .queue();
+        }
+    }
+
+    /**
+     * Força a atualização do tempo do jogo buscando dados frescos da API e envia no
+     * canal.
+     */
+    private void handleAtualizarTempo(SlashCommandInteractionEvent event, String userId) {
+        if (!checkAdmin(event, userId))
+            return;
+
+        String monitoredUrl = BotConfig.getMonitoredMatchUrl();
+        if (monitoredUrl == null || monitoredUrl.isBlank()) {
+            event.replyEmbeds(GameEmbeds.error("Sem Monitoramento",
+                    "Nenhuma partida está sendo monitorada. Use `/monitorar <url>` para iniciar."))
+                    .setEphemeral(true).queue();
+            return;
+        }
+
+        event.deferReply().queue();
+
+        try {
+            JsonObject json = apiClient.getMatch(monitoredUrl);
+            MatchState freshState = MatchState.fromJson(json);
+
+            // Atualizar o estado local do monitor
+            MatchState currentState = matchMonitor.getLastState();
+            if (currentState != null) {
+                currentState.setCurrentTime(freshState.getCurrentTime());
+                currentState.setPeriod(freshState.getPeriod());
+            }
+
+            // Enviar tempo atualizado no canal de notificações
+            TextChannel notifChannel = null;
+            if (BotConfig.getNotificationChannelId() != null && BotConfig.getGuildId() != null) {
+                var guild = event.getJDA().getGuildById(BotConfig.getGuildId());
+                if (guild != null) {
+                    notifChannel = guild.getTextChannelById(BotConfig.getNotificationChannelId());
+                }
+            }
+
+            String timeDisplay = freshState.getCurrentTime().isEmpty() ? "—" : freshState.getCurrentTime();
+            String periodDisplay = freshState.getPeriod().isEmpty() ? "—" : freshState.getPeriod();
+
+            if (notifChannel != null) {
+                notifChannel.sendMessageEmbeds(GameEmbeds.scoreboard(
+                        freshState.getHomeTeamName(), freshState.getHomeScore(),
+                        freshState.getAwayTeamName(), freshState.getAwayScore(),
+                        freshState.getChampionship(),
+                        periodDisplay + " — " + timeDisplay)).queue();
+            }
+
+            event.getHook().editOriginalEmbeds(GameEmbeds.success("Tempo Atualizado",
+                    String.format("**%s** — %s\n%s %d x %d %s",
+                            periodDisplay, timeDisplay,
+                            freshState.getHomeTeamName(), freshState.getHomeScore(),
+                            freshState.getAwayScore(), freshState.getAwayTeamName())))
+                    .queue();
+
+        } catch (Exception e) {
+            logger.error("Erro ao atualizar tempo: {}", e.getMessage());
+            event.getHook().editOriginalEmbeds(GameEmbeds.error("Erro",
+                    "Não foi possível atualizar o tempo do jogo. Verifique se a API está rodando."))
+                    .queue();
+        }
+    }
+
+    /**
+     * Envia um embed fictício de lance no canal de notificações configurado.
+     * Usado para debugar se o envio ao canal está funcionando.
+     */
+    private void handleTeste(SlashCommandInteractionEvent event, String userId) {
+        if (!checkAdmin(event, userId))
+            return;
+
+        String channelId = BotConfig.getNotificationChannelId();
+        String guildId = BotConfig.getGuildId();
+
+        logger.info("[TESTE] channelId={}, guildId={}, botEnabled={}", channelId, guildId, BotConfig.isBotEnabled());
+
+        if (channelId == null) {
+            event.replyEmbeds(GameEmbeds.error("Canal Não Configurado",
+                    "Nenhum canal de notificações foi selecionado.\n"
+                            + "Configure pelo `/painel`.\n\n"
+                            + "**Debug:** channelId=null, guildId=" + guildId))
+                    .setEphemeral(true).queue();
+            return;
+        }
+
+        if (guildId == null) {
+            event.replyEmbeds(GameEmbeds.error("Guild Não Configurada",
+                    "GUILD_ID não está definido no .env.\n\n"
+                            + "**Debug:** channelId=" + channelId + ", guildId=null"))
+                    .setEphemeral(true).queue();
+            return;
+        }
+
+        var guild = event.getJDA().getGuildById(guildId);
+        if (guild == null) {
+            event.replyEmbeds(GameEmbeds.error("Guild Não Encontrada",
+                    "Não foi possível encontrar a guild com ID: " + guildId))
+                    .setEphemeral(true).queue();
+            return;
+        }
+
+        TextChannel channel = guild.getTextChannelById(channelId);
+        if (channel == null) {
+            event.replyEmbeds(GameEmbeds.error("Canal Não Encontrado",
+                    "Não foi possível encontrar o canal com ID: " + channelId
+                            + "\nGuild: " + guild.getName() + " (" + guildId + ")"))
+                    .setEphemeral(true).queue();
+            return;
+        }
+
+        logger.info("[TESTE] Enviando embed fictício para #{} ({})", channel.getName(), channelId);
+
+        // Enviar embed de gol fictício
+        var embedGol = GameEmbeds.goalFromApi(
+                "⚽ GOOOOOL DO VITÓRIA!",
+                "Jogador Teste",
+                "37",
+                "Vitória 1 x 0 Bahia",
+                "Jogador Teste recebe na entrada da área e chuta no ângulo! Golaço!",
+                null);
+
+        // Enviar embed de lance importante fictício
+        var embedLance = GameEmbeds.importantEvent(
+                "⚠️ LANCE IMPORTANTE",
+                "42",
+                "Quase gol! Jogador Teste cabeceia e a bola explode na trave!",
+                null);
+
+        String roleMention = BotConfig.getNotificationRoleMention();
+
+        channel.sendMessage(roleMention.isEmpty() ? "**[TESTE]** Embed fictício de debug:"
+                : roleMention + " **[TESTE]** Embed fictício de debug:")
+                .setEmbeds(embedGol, embedLance)
+                .queue(
+                        success -> logger.info("[TESTE] Embeds enviados com sucesso para #{}", channel.getName()),
+                        error -> logger.error("[TESTE] FALHA ao enviar embeds para #{}: {}", channel.getName(),
+                                error.getMessage(), error));
+
+        event.replyEmbeds(GameEmbeds.success("Teste Enviado",
+                String.format("Embeds fictícios enviados para **#%s** (%s).\n\n"
+                        + "**Debug info:**\n"
+                        + "• guildId: %s\n"
+                        + "• channelId: %s\n"
+                        + "• botEnabled: %s\n"
+                        + "• roleMention: %s\n"
+                        + "• canal encontrado: ✅",
+                        channel.getName(), channelId, guildId, channelId,
+                        BotConfig.isBotEnabled(),
+                        roleMention.isEmpty() ? "(nenhum)" : roleMention)))
+                .setEphemeral(true).queue();
     }
 
     // ======================== UTILITÁRIOS ========================

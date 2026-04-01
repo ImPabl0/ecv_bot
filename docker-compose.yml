@@ -3,7 +3,7 @@ services:
     build: ./api_football
     container_name: ecv-api
     ports:
-      - "5000:5000"
+      - "5000"
     restart: unless-stopped
 
   bot:
