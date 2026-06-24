@@ -66,9 +66,16 @@ public class Main {
                 // Registrar slash commands
                 jda.updateCommands().addCommands(
                                 Commands.slash("painel", "Abre o painel administrativo do Leão Bot"),
-                                Commands.slash("monitorar", "Monitora uma partida pelo link do ge.globo.com")
-                                                .addOption(OptionType.STRING, "url", "URL da partida no ge.globo.com",
-                                                                true),
+                                Commands.slash("jogos",
+                                                "Lista os jogos de hoje por horário para monitorar sem precisar do link")
+                                                .addOption(OptionType.STRING, "filtro",
+                                                                "Filtra por time, campeonato ou país (ex: vitória, libertadores, england)",
+                                                                false),
+                                Commands.slash("monitorar",
+                                                "Lista os próximos jogos do GE para monitorar (ou informe um link)")
+                                                .addOption(OptionType.STRING, "url",
+                                                                "Opcional: URL da partida (ge.globo.com ou sofascore.com)",
+                                                                false),
                                 Commands.slash("parar", "Para o monitoramento da partida atual"),
                                 Commands.slash("placar", "Mostra o placar da partida monitorada"),
                                 Commands.slash("estatisticas", "Mostra as estatísticas da partida monitorada"),

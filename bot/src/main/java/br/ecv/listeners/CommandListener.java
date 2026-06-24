@@ -8,10 +8,14 @@ import br.ecv.model.MatchState;
 import br.ecv.model.MatchStatistics;
 import br.ecv.model.Player;
 import br.ecv.monitor.MatchMonitor;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import net.dv8tion.jda.api.entities.channel.concrete.TextChannel;
 import net.dv8tion.jda.api.events.interaction.command.SlashCommandInteractionEvent;
+import net.dv8tion.jda.api.events.interaction.component.StringSelectInteractionEvent;
 import net.dv8tion.jda.api.hooks.ListenerAdapter;
+import net.dv8tion.jda.api.interactions.callbacks.IReplyCallback;
 import net.dv8tion.jda.api.interactions.components.buttons.Button;
 import net.dv8tion.jda.api.interactions.components.selections.StringSelectMenu;
 import org.slf4j.Logger;
@@ -24,7 +28,8 @@ import java.util.Objects;
  * Listener para comandos slash do Leão Bot.
  * Comandos disponíveis:
  * - /painel: Painel administrativo
- * - /monitorar <url>: Inicia monitoramento de uma partida
+ * - /jogos [filtro]: Lista os jogos de hoje por horário e permite monitorar via menu
+ * - /monitorar [url]: Lista os próximos jogos do GE em um menu (ou monitora o link informado)
  * - /parar: Para o monitoramento
  * - /placar: Mostra o placar da partida monitorada
  * - /jogador: Gerencia jogadores (adicionar, remover, listar)
@@ -48,6 +53,7 @@ public class CommandListener extends ListenerAdapter {
 
         switch (command) {
             case "painel" -> handlePainel(event, userId);
+            case "jogos" -> handleJogos(event, userId);
             case "monitorar" -> handleMonitorar(event, userId);
             case "parar" -> handleParar(event, userId);
             case "placar" -> handlePlacar(event);
@@ -111,7 +117,107 @@ public class CommandListener extends ListenerAdapter {
     }
 
     /**
-     * Inicia o monitoramento de uma partida pelo link do ge.globo.com.
+     * Lista os jogos de hoje (ordenados por horário) em um menu de seleção.
+     * Ao escolher um jogo, o monitoramento é iniciado sem precisar do link.
+     */
+    private void handleJogos(SlashCommandInteractionEvent event, String userId) {
+        if (!checkAdmin(event, userId))
+            return;
+        if (!checkBotEnabled(event))
+            return;
+
+        var filtroOpt = event.getOption("filtro");
+        String filtro = filtroOpt != null ? filtroOpt.getAsString().trim() : "";
+
+        event.deferReply(true).queue();
+
+        try {
+            // Sem filtro: foca nos jogos do Brasil (lista enxuta e relevante).
+            // Com filtro: busca em todos os jogos do dia (time/campeonato/país).
+            JsonObject json = filtro.isBlank()
+                    ? apiClient.getTodayGames(null, "Brazil")
+                    : apiClient.getTodayGames(filtro, null);
+
+            JsonArray games = json.getAsJsonArray("games");
+
+            if (games == null || games.isEmpty()) {
+                event.getHook().editOriginalEmbeds(GameEmbeds.error("Nenhum Jogo",
+                        filtro.isBlank()
+                                ? "Não há jogos no Brasil para hoje. Use `/jogos filtro:<termo>` para buscar outros (ex: `england`, `libertadores`)."
+                                : "Nenhum jogo encontrado para o filtro **" + filtro + "** hoje."))
+                        .queue();
+                return;
+            }
+
+            StringSelectMenu.Builder menu = StringSelectMenu.create("select_game")
+                    .setPlaceholder("Selecione um jogo para monitorar")
+                    .setMinValues(1)
+                    .setMaxValues(1);
+
+            StringBuilder desc = new StringBuilder();
+            int count = 0;
+            for (JsonElement el : games) {
+                if (count >= 25)
+                    break;
+                JsonObject g = el.getAsJsonObject();
+
+                String time = getStr(g, "start_time");
+                String home = getStr(g, "home_team");
+                String away = getStr(g, "away_team");
+                String tournament = getStr(g, "tournament");
+                String url = getStr(g, "url");
+                String status = getStr(g, "status");
+
+                if (url.isBlank() || home.isBlank() || away.isBlank())
+                    continue;
+
+                String timeText = time.isBlank() ? "--:--" : time;
+                String tag = "inprogress".equals(status) ? " 🔴"
+                        : ("finished".equals(status) ? " ✅" : "");
+
+                String label = String.format("%s  %s x %s", timeText, home, away);
+                if (label.length() > 100)
+                    label = label.substring(0, 97) + "...";
+                String optDesc = tournament.length() > 100 ? tournament.substring(0, 100) : tournament;
+
+                if (optDesc.isBlank())
+                    menu.addOption(label, url);
+                else
+                    menu.addOption(label, url, optDesc);
+
+                desc.append(String.format("`%s` **%s** x **%s** — %s%s%n",
+                        timeText, home, away,
+                        tournament.isBlank() ? "—" : tournament, tag));
+                count++;
+            }
+
+            String header = filtro.isBlank()
+                    ? "Jogos de hoje no Brasil"
+                    : "Jogos de hoje • filtro: " + filtro;
+
+            event.getHook().editOriginalEmbeds(GameEmbeds.gamesList(header, desc.toString(), count))
+                    .setActionRow(menu.build())
+                    .queue();
+
+            logger.info("Lista de jogos exibida ({} jogos, filtro='{}') para {}", count, filtro,
+                    event.getUser().getName());
+
+        } catch (Exception e) {
+            logger.error("Erro ao listar jogos do dia: {}", e.getMessage());
+            event.getHook().editOriginalEmbeds(GameEmbeds.error("Erro",
+                    "Não foi possível buscar os jogos de hoje. Verifique se a API está rodando.\n" +
+                            "**Erro:** " + e.getMessage()))
+                    .queue();
+        }
+    }
+
+    /**
+     * Inicia o monitoramento de uma partida.
+     *
+     * Sem a opção {@code url}: mostra um menu com os próximos 10 jogos do GE
+     * (com página de tempo-real) para o admin escolher — sem precisar do link.
+     * Com a opção {@code url}: monitora diretamente o link informado
+     * (ge.globo.com ou sofascore.com).
      */
     private void handleMonitorar(SlashCommandInteractionEvent event, String userId) {
         if (!checkAdmin(event, userId))
@@ -119,13 +225,23 @@ public class CommandListener extends ListenerAdapter {
         if (!checkBotEnabled(event))
             return;
 
-        String url = event.getOption("url").getAsString().trim();
+        var urlOpt = event.getOption("url");
 
-        // Validar URL do ge.globo.com
-        if (!url.contains("ge.globo.com") && !url.contains("globoesporte.globo.com")) {
+        // Sem URL → listar os próximos jogos do GE em um menu de seleção
+        if (urlOpt == null || urlOpt.getAsString().isBlank()) {
+            showGeAgendaMenu(event);
+            return;
+        }
+
+        String url = urlOpt.getAsString().trim();
+
+        // Validar URL aceita (ge.globo.com ou Sofascore)
+        boolean isGe = url.contains("ge.globo.com") || url.contains("globoesporte.globo.com");
+        boolean isSofascore = url.contains("sofascore.com");
+        if (!isGe && !isSofascore) {
             event.replyEmbeds(GameEmbeds.error("URL Inválida",
-                    "A URL deve ser de uma partida do **ge.globo.com**.\n" +
-                            "Exemplo: `https://ge.globo.com/futebol/brasileirao-serie-a/jogo/...`"))
+                    "A URL deve ser de uma partida do **ge.globo.com** ou do **sofascore.com**.\n" +
+                            "Dica: use `/monitorar` sem informar o link para escolher um jogo na lista."))
                     .setEphemeral(true).queue();
             return;
         }
@@ -133,25 +249,7 @@ public class CommandListener extends ListenerAdapter {
         event.deferReply(true).queue();
 
         try {
-            // Tentar buscar a partida na API para validar a URL
-            JsonObject json = apiClient.getMatch(url);
-            MatchState state = MatchState.fromJson(json);
-
-            // Se o jogo monitorado anterior era outro, remover o tracker
-            String previousUrl = BotConfig.getMonitoredMatchUrl();
-            if (previousUrl != null && !previousUrl.equals(url)) {
-                try {
-                    apiClient.removeMatch(previousUrl);
-                } catch (Exception e) {
-                    logger.warn("Falha ao remover tracker anterior: {}", e.getMessage());
-                }
-            }
-
-            // Atualizar configuração
-            BotConfig.setMonitoredMatchUrl(url);
-
-            // Iniciar monitoramento
-            matchMonitor.start();
+            MatchState state = startMonitoring(url);
 
             event.getHook().editOriginalEmbeds(GameEmbeds.success("Monitoramento Iniciado",
                     String.format("Monitorando: **%s**\n%s\n\n" +
@@ -168,6 +266,162 @@ public class CommandListener extends ListenerAdapter {
                             "**Erro:** " + e.getMessage()))
                     .queue();
         }
+    }
+
+    /**
+     * Busca os próximos 10 jogos do GE e exibe um menu de seleção.
+     * A escolha é tratada por {@link #onStringSelectInteraction} (select_game).
+     */
+    private void showGeAgendaMenu(SlashCommandInteractionEvent event) {
+        event.deferReply(true).queue();
+
+        try {
+            JsonObject json = apiClient.getGeAgenda(10);
+            JsonArray games = json.getAsJsonArray("games");
+
+            if (games == null || games.isEmpty()) {
+                event.getHook().editOriginalEmbeds(GameEmbeds.error("Nenhum Jogo",
+                        "Não há próximos jogos com tempo-real disponíveis no GE no momento.\n" +
+                                "Você ainda pode informar o link manualmente: `/monitorar url:<link>`."))
+                        .queue();
+                return;
+            }
+
+            StringSelectMenu.Builder menu = StringSelectMenu.create("select_game")
+                    .setPlaceholder("Selecione um jogo para monitorar")
+                    .setMinValues(1)
+                    .setMaxValues(1);
+
+            StringBuilder desc = new StringBuilder();
+            int count = 0;
+            for (JsonElement el : games) {
+                if (count >= 25)
+                    break;
+                JsonObject g = el.getAsJsonObject();
+
+                String date = getStr(g, "date");
+                String time = getStr(g, "start_time");
+                String home = getStr(g, "home_team");
+                String away = getStr(g, "away_team");
+                String championship = getStr(g, "championship");
+                String url = getStr(g, "url");
+                String moment = getStr(g, "moment");
+
+                if (url.isBlank() || home.isBlank() || away.isBlank())
+                    continue;
+
+                String when = formatAgendaWhen(date, time);
+                String tag = "NOW".equals(moment) ? " 🔴 ao vivo" : "";
+
+                String label = String.format("%s  %s x %s", when, home, away);
+                if (label.length() > 100)
+                    label = label.substring(0, 97) + "...";
+                String optDesc = championship.length() > 100 ? championship.substring(0, 100) : championship;
+
+                if (optDesc.isBlank())
+                    menu.addOption(label, url);
+                else
+                    menu.addOption(label, url, optDesc);
+
+                desc.append(String.format("`%s` **%s** x **%s** — %s%s%n",
+                        when, home, away,
+                        championship.isBlank() ? "—" : championship, tag));
+                count++;
+            }
+
+            event.getHook().editOriginalEmbeds(GameEmbeds.gamesList("Próximos jogos no GE", desc.toString(), count))
+                    .setActionRow(menu.build())
+                    .queue();
+
+            logger.info("Menu de agenda do GE exibido ({} jogos) para {}", count, event.getUser().getName());
+
+        } catch (Exception e) {
+            logger.error("Erro ao buscar agenda do GE: {}", e.getMessage());
+            event.getHook().editOriginalEmbeds(GameEmbeds.error("Erro",
+                    "Não foi possível buscar a agenda do GE. Verifique se a API está rodando.\n" +
+                            "**Erro:** " + e.getMessage()))
+                    .queue();
+        }
+    }
+
+    /**
+     * Formata a exibição de data/horário da agenda: "HH:MM" se for hoje,
+     * "dd/MM HH:MM" caso contrário.
+     */
+    private static String formatAgendaWhen(String date, String time) {
+        String t = time.isBlank() ? "--:--" : time;
+        if (date == null || date.isBlank())
+            return t;
+
+        String today = java.time.LocalDate.now(java.time.ZoneId.of("America/Bahia")).toString();
+        if (date.equals(today))
+            return t;
+
+        // date vem como YYYY-MM-DD → exibe dd/MM
+        String[] parts = date.split("-");
+        if (parts.length == 3)
+            return parts[2] + "/" + parts[1] + " " + t;
+        return t;
+    }
+
+    /**
+     * Trata a seleção de um jogo no menu do comando /jogos: inicia o monitoramento.
+     */
+    @Override
+    public void onStringSelectInteraction(StringSelectInteractionEvent event) {
+        if (!event.getComponentId().equals("select_game"))
+            return;
+
+        String userId = event.getUser().getId();
+        if (!checkAdmin(event, userId))
+            return;
+
+        String url = event.getValues().get(0);
+        event.deferEdit().queue();
+
+        try {
+            MatchState state = startMonitoring(url);
+
+            event.getHook().editOriginalEmbeds(GameEmbeds.success("Monitoramento Iniciado",
+                    String.format("Monitorando: **%s**\n%s\n\n" +
+                            "Eventos serão notificados automaticamente no canal configurado.",
+                            state.getMatchLabel(), state.getScoreText())))
+                    .setComponents()
+                    .queue();
+
+            logger.info("Monitoramento iniciado via lista: {} ({})", state.getMatchLabel(), url);
+
+        } catch (Exception e) {
+            logger.error("Erro ao iniciar monitoramento via lista: {}", e.getMessage());
+            event.getHook().editOriginalEmbeds(GameEmbeds.error("Erro",
+                    "Não foi possível iniciar o monitoramento da partida selecionada.\n" +
+                            "**Erro:** " + e.getMessage()))
+                    .setComponents()
+                    .queue();
+        }
+    }
+
+    /**
+     * Inicia (ou troca) o monitoramento para a URL informada e retorna o estado da partida.
+     * Remove o tracker anterior na API caso seja outra partida.
+     */
+    private MatchState startMonitoring(String url) throws Exception {
+        JsonObject json = apiClient.getMatch(url);
+        MatchState state = MatchState.fromJson(json);
+
+        String previousUrl = BotConfig.getMonitoredMatchUrl();
+        if (previousUrl != null && !previousUrl.equals(url)) {
+            try {
+                apiClient.removeMatch(previousUrl);
+            } catch (Exception e) {
+                logger.warn("Falha ao remover tracker anterior: {}", e.getMessage());
+            }
+        }
+
+        BotConfig.setMonitoredMatchUrl(url);
+        matchMonitor.start();
+
+        return state;
     }
 
     /**
@@ -603,13 +857,20 @@ public class CommandListener extends ListenerAdapter {
 
     // ======================== UTILITÁRIOS ========================
 
-    private boolean checkAdmin(SlashCommandInteractionEvent event, String userId) {
+    private boolean checkAdmin(IReplyCallback event, String userId) {
         if (!BotConfig.isAdmin(userId)) {
             event.replyEmbeds(GameEmbeds.error("Acesso Negado", "Você não tem permissão para usar este comando."))
                     .setEphemeral(true).queue();
             return false;
         }
         return true;
+    }
+
+    private static String getStr(JsonObject obj, String key) {
+        if (obj.has(key) && !obj.get(key).isJsonNull()) {
+            return obj.get(key).getAsString();
+        }
+        return "";
     }
 
     private boolean checkBotEnabled(SlashCommandInteractionEvent event) {

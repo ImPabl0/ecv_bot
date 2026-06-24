@@ -428,6 +428,94 @@ def _extract_match_obj(big_script: str) -> dict | None:
         return None
 
 
+def _enclosing_object(text: str, pos: int, maxspan: int = 40000) -> str | None:
+    """
+    Retorna o objeto JSON `{...}` que contém a posição ``pos``, procurando
+    o `{` de abertura mais próximo para trás cujo fechamento balanceado
+    englobe ``pos``.
+    """
+    for s in range(pos, max(0, pos - maxspan), -1):
+        if text[s] == "{":
+            end = _find_balanced(text, s)
+            if end is not None and s <= pos <= end:
+                return text[s: end + 1]
+    return None
+
+
+def fetch_ge_agenda(only_upcoming: bool = True) -> list[dict]:
+    """
+    Lê a agenda do ge.globo.com (https://ge.globo.com/agenda/) e retorna a
+    lista de jogos de futebol que possuem página de tempo-real, ordenados
+    por data e horário.
+
+    Cada item contém time mandante/visitante, campeonato, data, horário,
+    situação e a ``url`` da página tempo-real (pronta para o /monitorar).
+
+    Se ``only_upcoming`` for True, exclui jogos já encerrados (moment PAST).
+    """
+    html = _fetch("https://ge.globo.com/agenda/")
+
+    games: list[dict] = []
+    seen: set = set()
+
+    for m in re.finditer(r'"transmission":\s*\{\s*"__typename":\s*"TRTransmission"', html):
+        obj_text = _enclosing_object(html, m.start())
+        if not obj_text:
+            continue
+        try:
+            obj = json.loads(obj_text)
+        except json.JSONDecodeError:
+            continue
+
+        if "firstContestant" not in obj or "secondContestant" not in obj:
+            continue
+
+        tr = obj.get("transmission") or {}
+        url = tr.get("url", "") or ""
+        # Apenas jogos de futebol com página de tempo-real
+        if not url or "/jogo/" not in url or "/futebol/" not in url:
+            continue
+
+        game_id = obj.get("id")
+        if game_id in seen:
+            continue
+        seen.add(game_id)
+
+        moment = obj.get("moment", "")
+        if only_upcoming and moment == "PAST":
+            continue
+
+        home = obj.get("firstContestant") or {}
+        away = obj.get("secondContestant") or {}
+        phase = obj.get("phase") or {}
+        ce = phase.get("championshipEdition") or {}
+        championship = (ce.get("championship") or {}).get("name", "") or phase.get("name", "")
+        scoreboard = obj.get("scoreboard") or {}
+        bstatus = tr.get("broadcastStatus") or {}
+
+        start_date = obj.get("startDate", "") or ""        # YYYY-MM-DD
+        start_hour = (obj.get("startHour", "") or "")[:5]   # HH:MM
+
+        games.append(OrderedDict([
+            ("url", url),
+            ("home_team", home.get("popularName") or home.get("name", "")),
+            ("away_team", away.get("popularName") or away.get("name", "")),
+            ("home_badge", home.get("badgePng", "")),
+            ("away_badge", away.get("badgePng", "")),
+            ("championship", championship),
+            ("date", start_date),
+            ("start_time", start_hour),
+            ("moment", moment),                                  # PAST, NOW, FUTURE
+            ("status", bstatus.get("id", "")),
+            ("status_label", bstatus.get("label", "")),
+            ("home_score", scoreboard.get("home")),
+            ("away_score", scoreboard.get("away")),
+        ]))
+
+    games.sort(key=lambda g: (g["date"] or "", g["start_time"] or ""))
+    return games
+
+
 def scrape_match(url: str) -> MatchData:
     """
     Faz o scraping completo de uma página de jogo do ge.globo.com.

@@ -1,5 +1,5 @@
 """
-app.py — API Flask para consulta de eventos de jogos do ge.globo.com
+app.py — API Flask para consulta de eventos de jogos (ge.globo.com + Sofascore)
 
 Execução:
     python app.py
@@ -9,8 +9,10 @@ Uso:
     GET /trackers                          → lista todos os trackers ativos
     DELETE /match?url=<URL_DO_JOGO>        → para e remove o tracker da URL
 
-Exemplo:
+Exemplo (GE):
     http://localhost:5000/match?url=https://ge.globo.com/futebol/futebol-internacional/futebol-espanhol/jogo/16-02-2026/girona-barcelona.ghtml
+Exemplo (Sofascore):
+    http://localhost:5000/match?url=https://www.sofascore.com/pt/football/match/al-duhail-al-ahli/uOnsQNr#id:15884736
 """
 
 import logging
@@ -21,6 +23,11 @@ from collections import OrderedDict
 
 from flask import Flask, request, jsonify, Response
 from tracker import MatchTrackerManager
+from scraper import fetch_ge_agenda
+from datetime import datetime
+
+from sofascore_scraper import is_sofascore_url, extract_event_id, fetch_scheduled_events, BR_TZ
+from sofascore_tracker import SofascoreTracker
 
 # ─── Config / Logging ──────────────────────────────────────────────
 
@@ -34,9 +41,18 @@ app = Flask(__name__)
 app.json.sort_keys = False  # preservar a ordem das chaves no JSON
 
 manager = MatchTrackerManager()
+sofascore_trackers: dict[str, SofascoreTracker] = {}
+_sofascore_lock = __import__("threading").Lock()
 
 # Garantir que todas as threads são paradas ao encerrar o app
-atexit.register(manager.stop_all)
+def _stop_all():
+    manager.stop_all()
+    with _sofascore_lock:
+        for t in sofascore_trackers.values():
+            t.stop()
+        sofascore_trackers.clear()
+
+atexit.register(_stop_all)
 
 
 # ─── Validação ──────────────────────────────────────────────────────
@@ -46,9 +62,50 @@ def _validate_url(url: str):
     url = url.strip()
     if not url:
         return None, (jsonify({"error": "Parâmetro 'url' é obrigatório."}), 400)
+
+    # Aceitar URLs do ge.globo.com OU do Sofascore
+    if is_sofascore_url(url):
+        event_id = extract_event_id(url)
+        if not event_id:
+            return None, (jsonify({"error": "URL do Sofascore inválida. Não foi possível extrair o event_id."}), 400)
+        return url, None
+
     if "ge.globo.com" not in url or "/jogo/" not in url:
-        return None, (jsonify({"error": "URL inválida. Informe uma URL de jogo do ge.globo.com."}), 400)
+        return None, (jsonify({"error": "URL inválida. Informe uma URL de jogo do ge.globo.com ou sofascore.com."}), 400)
+
     return url, None
+
+
+def _get_or_create_tracker(url: str):
+    """
+    Retorna o tracker adequado para a URL (GE ou Sofascore).
+    Cria e inicia um novo se não existir.
+    """
+    if is_sofascore_url(url):
+        key = url.split("?")[0].rstrip("/")
+        with _sofascore_lock:
+            if key not in sofascore_trackers:
+                tracker = SofascoreTracker(url=url)
+                tracker.start()
+                sofascore_trackers[key] = tracker
+                logging.getLogger(__name__).info("Novo tracker Sofascore criado: %s", key)
+            return sofascore_trackers[key]
+    else:
+        return manager.get_or_create(url)
+
+
+def _remove_tracker(url: str) -> bool:
+    """Remove o tracker adequado para a URL."""
+    if is_sofascore_url(url):
+        key = url.split("?")[0].rstrip("/")
+        with _sofascore_lock:
+            tracker = sofascore_trackers.pop(key, None)
+        if tracker:
+            tracker.stop()
+            return True
+        return False
+    else:
+        return manager.remove(url)
 
 
 # ─── Rotas ──────────────────────────────────────────────────────────
@@ -65,7 +122,7 @@ def get_match():
         return err
 
     try:
-        tracker = manager.get_or_create(url)
+        tracker = _get_or_create_tracker(url)
         data = tracker.get_data()
     except Exception as e:
         return jsonify({"error": f"Erro ao buscar dados: {str(e)}"}), 500
@@ -91,18 +148,95 @@ def remove_match():
     if err:
         return err
 
-    removed = manager.remove(url)
+    removed = _remove_tracker(url)
     if removed:
         return jsonify({"message": f"Tracker removido: {url}"}), 200
     return jsonify({"error": "Nenhum tracker ativo para essa URL."}), 404
 
 
+@app.route("/agenda", methods=["GET"])
+def ge_agenda():
+    """
+    Lista os próximos jogos de futebol do ge.globo.com (com página de
+    tempo-real), ordenados por data e horário.
+
+    Parâmetros (query string):
+      - limit:    quantidade máxima de jogos (padrão: 10)
+      - upcoming: '1' (padrão) exclui jogos encerrados; '0' inclui todos
+
+    Uso: GET /agenda  |  GET /agenda?limit=10
+    """
+    try:
+        limit = int(request.args.get("limit", "10"))
+    except ValueError:
+        limit = 10
+    limit = max(1, min(limit, 25))
+
+    only_upcoming = request.args.get("upcoming", "1").strip() != "0"
+
+    try:
+        games = fetch_ge_agenda(only_upcoming=only_upcoming)
+    except Exception as e:
+        return jsonify({"error": f"Erro ao buscar a agenda do GE: {str(e)}"}), 500
+
+    games = games[:limit]
+    return jsonify(OrderedDict([
+        ("count", len(games)),
+        ("games", games),
+    ])), 200
+
+
+@app.route("/today", methods=["GET"])
+def today_games():
+    """
+    Lista os jogos de futebol do dia (Sofascore), ordenados por horário.
+
+    Parâmetros (query string):
+      - date:    data no formato YYYY-MM-DD (padrão: hoje, fuso do Brasil)
+      - q:       filtro por texto — busca em time/campeonato/país
+      - country: filtra por país exato (ex: Brazil)
+
+    Uso: GET /today  |  GET /today?q=vitória  |  GET /today?country=Brazil
+    """
+    target_date = request.args.get("date", "").strip() or None
+    q = request.args.get("q", "").strip().lower()
+    country = request.args.get("country", "").strip().lower()
+
+    try:
+        games = fetch_scheduled_events(target_date)
+    except Exception as e:
+        return jsonify({"error": f"Erro ao buscar jogos do dia: {str(e)}"}), 500
+
+    if q:
+        def _matches(g):
+            blob = " ".join([
+                str(g.get("home_team", "")),
+                str(g.get("away_team", "")),
+                str(g.get("tournament", "")),
+                str(g.get("country", "")),
+            ]).lower()
+            return q in blob
+        games = [g for g in games if _matches(g)]
+    elif country:
+        games = [g for g in games if str(g.get("country", "")).lower() == country]
+
+    return jsonify(OrderedDict([
+        ("date", target_date or datetime.now(BR_TZ).strftime("%Y-%m-%d")),
+        ("count", len(games)),
+        ("games", games),
+    ])), 200
+
+
 @app.route("/trackers", methods=["GET"])
 def list_trackers():
     """Lista todos os trackers ativos com seus status."""
+    ge_trackers = manager.list_all()
+    with _sofascore_lock:
+        sf_trackers = [t.status_dict() for t in sofascore_trackers.values()]
+    all_trackers = ge_trackers + sf_trackers
     return jsonify({
-        "count": len(manager.list_all()),
-        "trackers": manager.list_all(),
+        "count": len(all_trackers),
+        "trackers": all_trackers,
     }), 200
 
 
@@ -127,7 +261,7 @@ def stream_events():
         return err
 
     try:
-        tracker = manager.get_or_create(url)
+        tracker = _get_or_create_tracker(url)
     except Exception as e:
         return jsonify({"error": f"Erro ao criar tracker: {str(e)}"}), 500
 
@@ -139,7 +273,7 @@ def stream_events():
             initial_data = tracker.get_data().to_dict()
             initial_data["_tracker"] = OrderedDict([
                 ("is_running", tracker.is_running),
-                ("sse_connected", tracker.sse_connected),
+                ("sse_connected", getattr(tracker, 'sse_connected', False)),
             ])
             yield f"event: connected\ndata: {json.dumps(initial_data, ensure_ascii=False)}\n\n"
 
@@ -175,27 +309,34 @@ def stream_events():
 @app.route("/", methods=["GET"])
 def index():
     return jsonify(OrderedDict([
-        ("app", "GE Football Scraper API"),
-        ("version", "4.0.0"),
-        ("description", "API com monitoramento em tempo real via SSE (PushStream) de partidas do ge.globo.com"),
+        ("app", "Football Scraper API"),
+        ("version", "5.0.0"),
+        ("description", "API com monitoramento em tempo real de partidas (ge.globo.com + Sofascore)"),
         ("endpoints", OrderedDict([
             ("GET /", "Informações da API"),
             ("GET /match?url=<URL>",
-             "Dados da partida (cria tracker automático com SSE se não existir)"),
+             "Dados da partida (cria tracker automático — suporta ge.globo.com e sofascore.com)"),
             ("DELETE /match?url=<URL>",
              "Para e remove o tracker de uma partida"),
+            ("GET /agenda",
+             "Lista os próximos jogos de futebol do GE com tempo-real (?limit=, ?upcoming=)"),
+            ("GET /today",
+             "Lista os jogos do dia ordenados por horário (filtros: ?q=, ?country=, ?date=)"),
             ("GET /trackers",
              "Lista todos os trackers ativos"),
             ("GET /stream?url=<URL>",
              "SSE stream em tempo real — retransmite eventos da partida"),
         ])),
-        ("exemplo", "GET /match?url=https://ge.globo.com/futebol/futebol-internacional/futebol-espanhol/jogo/16-02-2026/girona-barcelona.ghtml"),
+        ("exemplos", OrderedDict([
+            ("ge.globo.com", "GET /match?url=https://ge.globo.com/futebol/futebol-internacional/futebol-espanhol/jogo/16-02-2026/girona-barcelona.ghtml"),
+            ("sofascore.com", "GET /match?url=https://www.sofascore.com/pt/football/match/team-a-team-b/abc#id:12345678"),
+        ])),
     ]))
 
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("  GE Football Scraper API  v4.0 (SSE retransmission)")
+    print("  Football Scraper API  v5.0 (GE + Sofascore)")
     print("  Rodando em http://localhost:5000")
     print("=" * 60)
     print()

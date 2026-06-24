@@ -48,6 +48,11 @@ public class ButtonListener extends ListenerAdapter {
 
     @Override
     public void onStringSelectInteraction(StringSelectInteractionEvent event) {
+        // O menu de jogos (select_game) é tratado no CommandListener.
+        if (!event.getComponentId().equals("select_channel")) {
+            return;
+        }
+
         String userId = event.getUser().getId();
 
         if (!BotConfig.isAdmin(userId)) {

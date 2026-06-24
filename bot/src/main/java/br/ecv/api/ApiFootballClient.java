@@ -74,6 +74,67 @@ public class ApiFootballClient {
     }
 
     /**
+     * Lista os próximos jogos de futebol do GE (com página de tempo-real),
+     * ordenados por data e horário.
+     *
+     * @param limit quantidade máxima de jogos (1–25)
+     */
+    public JsonObject getGeAgenda(int limit) throws IOException {
+        String url = baseUrl + "/agenda?limit=" + limit;
+
+        Request request = new Request.Builder()
+                .url(url)
+                .get()
+                .build();
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            String body = response.body() != null ? response.body().string() : "{}";
+
+            if (!response.isSuccessful()) {
+                logger.error("API Football /agenda retornou {}: {}", response.code(), body);
+                throw new IOException("API retornou código " + response.code() + ": " + body);
+            }
+
+            return JsonParser.parseString(body).getAsJsonObject();
+        }
+    }
+
+    /**
+     * Lista os jogos do dia (Sofascore), ordenados por horário.
+     *
+     * @param query   filtro por texto (time/campeonato/país) — opcional
+     * @param country filtra por país exato (ex: "Brazil") — opcional
+     */
+    public JsonObject getTodayGames(String query, String country) throws IOException {
+        StringBuilder url = new StringBuilder(baseUrl + "/today");
+        char sep = '?';
+
+        if (query != null && !query.isBlank()) {
+            url.append(sep).append("q=").append(URLEncoder.encode(query, StandardCharsets.UTF_8));
+            sep = '&';
+        }
+        if (country != null && !country.isBlank()) {
+            url.append(sep).append("country=").append(URLEncoder.encode(country, StandardCharsets.UTF_8));
+        }
+
+        Request request = new Request.Builder()
+                .url(url.toString())
+                .get()
+                .build();
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            String body = response.body() != null ? response.body().string() : "{}";
+
+            if (!response.isSuccessful()) {
+                logger.error("API Football /today retornou {}: {}", response.code(), body);
+                throw new IOException("API retornou código " + response.code() + ": " + body);
+            }
+
+            return JsonParser.parseString(body).getAsJsonObject();
+        }
+    }
+
+    /**
      * Lista todos os trackers ativos.
      */
     public JsonObject getTrackers() throws IOException {

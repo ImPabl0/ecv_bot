@@ -331,6 +331,28 @@ public class GameEmbeds {
     }
 
     /**
+     * Embed da lista de jogos do dia (comando /jogos).
+     */
+    public static MessageEmbed gamesList(String header, String gamesText, int count) {
+        String body = (gamesText == null || gamesText.isBlank())
+                ? "Nenhum jogo encontrado."
+                : gamesText;
+        // Limite de descrição de embed: 4096 caracteres
+        if (body.length() > 4000) {
+            body = body.substring(0, 4000) + "\n…";
+        }
+
+        return new EmbedBuilder()
+                .setTitle("📅 " + (header != null && !header.isBlank() ? header : "Jogos de Hoje"))
+                .setDescription(body)
+                .setFooter(FOOTER_TEXT + " • " + count + " jogo(s) — selecione abaixo para monitorar")
+                .setColor(VITORIA_RED)
+                .setThumbnail(VITORIA_ICON)
+                .setTimestamp(Instant.now())
+                .build();
+    }
+
+    /**
      * Embed de lista de jogadores.
      */
     public static MessageEmbed playerList(String playerListText) {
