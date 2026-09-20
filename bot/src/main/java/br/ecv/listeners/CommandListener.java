@@ -559,54 +559,65 @@ public class CommandListener extends ListenerAdapter {
 
         String subcommand = event.getSubcommandName();
 
-        switch (Objects.requireNonNull(subcommand)) {
-            case "adicionar" -> {
-                String nome = event.getOption("nome").getAsString();
-                int numero = event.getOption("numero").getAsInt();
-                String posicao = event.getOption("posicao").getAsString();
-                String time = event.getOption("time").getAsString();
-                String stickerId = event.getOption("sticker_id") != null
-                        ? event.getOption("sticker_id").getAsString()
-                        : null;
+        // As operações abaixo vão ao MongoDB; deferir evita estourar os 3s de
+        // acknowledge da interação se o banco estiver lento ou indisponível.
+        event.deferReply(true).queue();
 
-                Player player = new Player(nome, numero, posicao, time, stickerId);
-                playerRepository.addPlayer(player);
+        try {
+            switch (Objects.requireNonNull(subcommand)) {
+                case "adicionar" -> {
+                    String nome = event.getOption("nome").getAsString();
+                    int numero = event.getOption("numero").getAsInt();
+                    String posicao = event.getOption("posicao").getAsString();
+                    String time = event.getOption("time").getAsString();
+                    String stickerId = event.getOption("sticker_id") != null
+                            ? event.getOption("sticker_id").getAsString()
+                            : null;
 
-                event.replyEmbeds(GameEmbeds.success("Jogador Adicionado",
-                        String.format("**%s** (#%d - %s | %s) foi adicionado ao elenco.",
-                                nome, numero, posicao, time)))
-                        .setEphemeral(true).queue();
-                logger.info("Jogador adicionado: {} #{} ({}) - {}", nome, numero, posicao, time);
-            }
-            case "remover" -> {
-                String nome = event.getOption("nome").getAsString();
-                boolean removed = playerRepository.removePlayer(nome);
+                    Player player = new Player(nome, numero, posicao, time, stickerId);
+                    playerRepository.addPlayer(player);
 
-                if (removed) {
-                    event.replyEmbeds(GameEmbeds.success("Jogador Removido",
-                            String.format("**%s** foi removido do elenco.", nome)))
-                            .setEphemeral(true).queue();
-                } else {
-                    event.replyEmbeds(GameEmbeds.error("Não Encontrado",
-                            String.format("Jogador **%s** não foi encontrado.", nome)))
-                            .setEphemeral(true).queue();
+                    event.getHook().editOriginalEmbeds(GameEmbeds.success("Jogador Adicionado",
+                            String.format("**%s** (#%d - %s | %s) foi adicionado ao elenco.",
+                                    nome, numero, posicao, time)))
+                            .queue();
+                    logger.info("Jogador adicionado: {} #{} ({}) - {}", nome, numero, posicao, time);
                 }
-            }
-            case "listar" -> {
-                List<Player> players = playerRepository.findAll();
-                StringBuilder sb = new StringBuilder();
-                for (Player p : players) {
-                    sb.append(String.format("**#%d** %s - %s (%s)",
-                            p.getNumero(), p.getNome(), p.getPosicao(),
-                            p.getTime() != null ? p.getTime() : "—"));
-                    if (p.getStickerId() != null) {
-                        sb.append(" 🏷");
+                case "remover" -> {
+                    String nome = event.getOption("nome").getAsString();
+                    boolean removed = playerRepository.removePlayer(nome);
+
+                    if (removed) {
+                        event.getHook().editOriginalEmbeds(GameEmbeds.success("Jogador Removido",
+                                String.format("**%s** foi removido do elenco.", nome)))
+                                .queue();
+                    } else {
+                        event.getHook().editOriginalEmbeds(GameEmbeds.error("Não Encontrado",
+                                String.format("Jogador **%s** não foi encontrado.", nome)))
+                                .queue();
                     }
-                    sb.append("\n");
                 }
-                event.replyEmbeds(GameEmbeds.playerList(sb.toString()))
-                        .setEphemeral(true).queue();
+                case "listar" -> {
+                    List<Player> players = playerRepository.findAll();
+                    StringBuilder sb = new StringBuilder();
+                    for (Player p : players) {
+                        sb.append(String.format("**#%d** %s - %s (%s)",
+                                p.getNumero(), p.getNome(), p.getPosicao(),
+                                p.getTime() != null ? p.getTime() : "—"));
+                        if (p.getStickerId() != null) {
+                            sb.append(" 🏷");
+                        }
+                        sb.append("\n");
+                    }
+                    event.getHook().editOriginalEmbeds(GameEmbeds.playerList(sb.toString()))
+                            .queue();
+                }
             }
+        } catch (Exception e) {
+            logger.error("Erro ao acessar o banco de jogadores: {}", e.getMessage());
+            event.getHook().editOriginalEmbeds(GameEmbeds.error("Erro no Banco",
+                    "Não foi possível acessar o banco de jogadores.\n**Erro:** " + e.getMessage()))
+                    .queue();
         }
     }
 

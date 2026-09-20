@@ -13,6 +13,11 @@ services:
       - ./bot/.env
     environment:
       - API_FOOTBALL_URL=http://api:5000
+    # O DNS embutido do Docker costuma falhar em consultas SRV (mongodb+srv://),
+    # então o container resolve nomes por servidores públicos.
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     depends_on:
       - api
     restart: unless-stopped
