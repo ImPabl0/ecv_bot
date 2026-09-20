@@ -26,7 +26,7 @@ public class ButtonListener extends ListenerAdapter {
     public void onButtonInteraction(ButtonInteractionEvent event) {
         String userId = event.getUser().getId();
 
-        if (!BotConfig.isAdmin(userId)) {
+        if (!BotConfig.isAdmin(event.getMember()) && !BotConfig.isAdmin(userId)) {
             event.replyEmbeds(GameEmbeds.error("Acesso Negado", "Você não tem permissão."))
                     .setEphemeral(true).queue();
             return;
@@ -55,7 +55,7 @@ public class ButtonListener extends ListenerAdapter {
 
         String userId = event.getUser().getId();
 
-        if (!BotConfig.isAdmin(userId)) {
+        if (!BotConfig.isAdmin(event.getMember()) && !BotConfig.isAdmin(userId)) {
             event.replyEmbeds(GameEmbeds.error("Acesso Negado", "Você não tem permissão."))
                     .setEphemeral(true).queue();
             return;

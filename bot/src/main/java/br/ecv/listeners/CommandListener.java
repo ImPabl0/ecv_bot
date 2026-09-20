@@ -22,7 +22,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Listener para comandos slash do Leão Bot.
@@ -38,6 +40,12 @@ public class CommandListener extends ListenerAdapter {
 
     private static final Logger logger = LoggerFactory.getLogger(CommandListener.class);
     private final PlayerRepository playerRepository = new PlayerRepository();
+    /**
+     * Cache token → URL do jogo. O Discord limita o valor de uma opção de menu a
+     * 100 caracteres e as URLs do GE passam disso, então o menu carrega apenas um
+     * token curto e a URL real é resolvida aqui na seleção.
+     */
+    private final Map<String, String> gameUrlCache = new ConcurrentHashMap<>();
     private final ApiFootballClient apiClient;
     private final MatchMonitor matchMonitor;
 
@@ -70,11 +78,8 @@ public class CommandListener extends ListenerAdapter {
      * Abre o painel administrativo com informações do jogo monitorado.
      */
     private void handlePainel(SlashCommandInteractionEvent event, String userId) {
-        if (!BotConfig.isAdmin(userId)) {
-            event.replyEmbeds(GameEmbeds.error("Acesso Negado", "Você não tem permissão para acessar o painel."))
-                    .setEphemeral(true).queue();
+        if (!checkAdmin(event, userId))
             return;
-        }
 
         String channelName = null;
         if (BotConfig.getNotificationChannelId() != null) {
@@ -180,10 +185,11 @@ public class CommandListener extends ListenerAdapter {
                     label = label.substring(0, 97) + "...";
                 String optDesc = tournament.length() > 100 ? tournament.substring(0, 100) : tournament;
 
+                String value = cacheGameUrl(url);
                 if (optDesc.isBlank())
-                    menu.addOption(label, url);
+                    menu.addOption(label, value);
                 else
-                    menu.addOption(label, url, optDesc);
+                    menu.addOption(label, value, optDesc);
 
                 desc.append(String.format("`%s` **%s** x **%s** — %s%s%n",
                         timeText, home, away,
@@ -318,10 +324,11 @@ public class CommandListener extends ListenerAdapter {
                     label = label.substring(0, 97) + "...";
                 String optDesc = championship.length() > 100 ? championship.substring(0, 100) : championship;
 
+                String value = cacheGameUrl(url);
                 if (optDesc.isBlank())
-                    menu.addOption(label, url);
+                    menu.addOption(label, value);
                 else
-                    menu.addOption(label, url, optDesc);
+                    menu.addOption(label, value, optDesc);
 
                 desc.append(String.format("`%s` **%s** x **%s** — %s%s%n",
                         when, home, away,
@@ -376,7 +383,14 @@ public class CommandListener extends ListenerAdapter {
         if (!checkAdmin(event, userId))
             return;
 
-        String url = event.getValues().get(0);
+        String url = resolveGameUrl(event.getValues().get(0));
+        if (url == null) {
+            event.replyEmbeds(GameEmbeds.error("Jogo Indisponível",
+                    "Esta lista expirou (o bot foi reiniciado). Rode `/monitorar` ou `/jogos` novamente."))
+                    .setEphemeral(true).queue();
+            return;
+        }
+
         event.deferEdit().queue();
 
         try {
@@ -857,8 +871,39 @@ public class CommandListener extends ListenerAdapter {
 
     // ======================== UTILITÁRIOS ========================
 
+    /**
+     * Guarda a URL do jogo e devolve um token curto para usar como valor da opção
+     * do menu (o Discord aceita no máximo 100 caracteres por valor).
+     */
+    private String cacheGameUrl(String url) {
+        if (gameUrlCache.size() > 500)
+            gameUrlCache.clear();
+        String base = "g" + Integer.toHexString(url.hashCode());
+        String token = base;
+        for (int i = 1; i < 100; i++) {
+            String existing = gameUrlCache.putIfAbsent(token, url);
+            if (existing == null || existing.equals(url))
+                return token;
+            token = base + "_" + i;
+        }
+        gameUrlCache.put(token, url);
+        return token;
+    }
+
+    /**
+     * Converte o valor selecionado no menu de volta para a URL do jogo.
+     * Retorna {@code null} quando o token não está mais em cache.
+     */
+    private String resolveGameUrl(String value) {
+        if (value == null || value.isBlank())
+            return null;
+        if (value.startsWith("http"))
+            return value;
+        return gameUrlCache.get(value);
+    }
+
     private boolean checkAdmin(IReplyCallback event, String userId) {
-        if (!BotConfig.isAdmin(userId)) {
+        if (!BotConfig.isAdmin(event.getMember()) && !BotConfig.isAdmin(userId)) {
             event.replyEmbeds(GameEmbeds.error("Acesso Negado", "Você não tem permissão para usar este comando."))
                     .setEphemeral(true).queue();
             return false;
