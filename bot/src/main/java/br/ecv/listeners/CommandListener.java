@@ -16,8 +16,9 @@ import net.dv8tion.jda.api.events.interaction.command.SlashCommandInteractionEve
 import net.dv8tion.jda.api.events.interaction.component.StringSelectInteractionEvent;
 import net.dv8tion.jda.api.hooks.ListenerAdapter;
 import net.dv8tion.jda.api.interactions.callbacks.IReplyCallback;
-import net.dv8tion.jda.api.interactions.components.buttons.Button;
-import net.dv8tion.jda.api.interactions.components.selections.StringSelectMenu;
+import net.dv8tion.jda.api.components.actionrow.ActionRow;
+import net.dv8tion.jda.api.components.buttons.Button;
+import net.dv8tion.jda.api.components.selections.StringSelectMenu;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -113,10 +114,11 @@ public class CommandListener extends ListenerAdapter {
         }
 
         event.replyEmbeds(GameEmbeds.adminPanel(BotConfig.isBotEnabled(), channelName, monitoredUrl, matchLabel))
-                .addActionRow(
-                        Button.success("btn_enable", "✅ Ativar Bot"),
-                        Button.danger("btn_disable", "❌ Desativar Bot"))
-                .addActionRow(menuBuilder.build())
+                .addComponents(
+                        ActionRow.of(
+                                Button.success("btn_enable", "✅ Ativar Bot"),
+                                Button.danger("btn_disable", "❌ Desativar Bot")),
+                        ActionRow.of(menuBuilder.build()))
                 .setEphemeral(true)
                 .queue();
     }
@@ -202,7 +204,7 @@ public class CommandListener extends ListenerAdapter {
                     : "Jogos de hoje • filtro: " + filtro;
 
             event.getHook().editOriginalEmbeds(GameEmbeds.gamesList(header, desc.toString(), count))
-                    .setActionRow(menu.build())
+                    .setComponents(ActionRow.of(menu.build()))
                     .queue();
 
             logger.info("Lista de jogos exibida ({} jogos, filtro='{}') para {}", count, filtro,
@@ -337,7 +339,7 @@ public class CommandListener extends ListenerAdapter {
             }
 
             event.getHook().editOriginalEmbeds(GameEmbeds.gamesList("Próximos jogos no GE", desc.toString(), count))
-                    .setActionRow(menu.build())
+                    .setComponents(ActionRow.of(menu.build()))
                     .queue();
 
             logger.info("Menu de agenda do GE exibido ({} jogos) para {}", count, event.getUser().getName());
